@@ -1,0 +1,24 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "Sectioned UV Tools",
+	"Description": "Material function and mesh UV splitting tools for doing sectioned UV masking",
+	"Category": "Other",
+	"CreatedBy": "Solar Storm Interactive",
+	"CreatedByURL": "https://github.com/SolarStormInteractive",
+	"DocsURL": "https://github.com/SolarStormInteractive",
+	"MarketplaceURL": "",
+	"SupportURL": "https://github.com/SolarStormInteractive",
+	"CanContainContent": true,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "SectionedUVTools",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
+		}
+	]
+}
