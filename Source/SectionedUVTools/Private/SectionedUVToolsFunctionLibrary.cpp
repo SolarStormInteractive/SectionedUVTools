@@ -17,11 +17,17 @@ USkeletalMesh* USectionedUVToolsFunctionLibrary::CreateSectionedUVSkeletalMesh(U
 																			   TArray<int32> materialSlots,
 																			   const int32 numSections)
 {
-	if(!skeletalMesh || !skeletalMesh->GetPackage() || numSections < 2)
+	if(!skeletalMesh || !skeletalMesh->GetPackage())
 	{
 		return nullptr;
 	}
 
+	if(numSections < 2)
+	{
+		UE_LOG(LogSectionedUVTools, Error, TEXT("Cannot section the skeletal mesh. Number of sections should be greater than 2. 8 or 16 are good choices."));
+		return nullptr;
+	}
+	
 	if(materialSlots.Num())
 	{
 		const TArray<FSkeletalMaterial>& materials = skeletalMesh->GetMaterials();
@@ -29,6 +35,7 @@ USkeletalMesh* USectionedUVToolsFunctionLibrary::CreateSectionedUVSkeletalMesh(U
 		{
 			if(!materials.IsValidIndex(materialSlot))
 			{
+				UE_LOG(LogSectionedUVTools, Error, TEXT("Cannot section the skeletal mesh. Material slot index '%d' is invalid!"), materialSlot);
 				return nullptr;
 			}
 		}
@@ -46,6 +53,19 @@ USkeletalMesh* USectionedUVToolsFunctionLibrary::CreateSectionedUVSkeletalMesh(U
 		{
 			materialSlots.Add(materialIndex);
 		}
+	}
+
+	if(numSections < materialSlots.Num())
+	{
+		UE_LOG(LogSectionedUVTools, Error, TEXT("Cannot section the skeletal mesh. Number of sections needs to be greater than or equal to the number of materials!"));
+		return nullptr;
+	}
+
+	TMap<int32, int32> matIndexToUVSection;
+	int32 curSectionIndex = 0;
+	for(const int32& materialSlot : materialSlots)
+	{
+		matIndexToUVSection.Add(materialSlot, curSectionIndex++);
 	}
 	
 	FString packageName = skeletalMesh->GetPackage()->GetPathName() + TEXT("_sectioned");
@@ -76,6 +96,9 @@ USkeletalMesh* USectionedUVToolsFunctionLibrary::CreateSectionedUVSkeletalMesh(U
 	FSkeletalMeshModel* skelMeshModel = sectionedMesh->GetImportedModel();
 	if(!skelMeshModel)
 	{
+		sectionedMesh->ConditionalBeginDestroy();
+		skelMeshPackage->ConditionalBeginDestroy();
+		UE_LOG(LogSectionedUVTools, Error, TEXT("Cannot section the skeletal mesh. No imported model on original skeletal mesh?!"));
 		return nullptr;
 	}
 	
@@ -108,38 +131,42 @@ USkeletalMesh* USectionedUVToolsFunctionLibrary::CreateSectionedUVSkeletalMesh(U
 	
 	for(FSkeletalMeshLODModel& lodModel : skelMeshModel->LODModels)
 	{
+		// Add another texture coordinate
+		lodModel.NumTexCoords += 1;
 		for(FSkelMeshSection& section : lodModel.Sections)
 		{
 			if(materialSlots.Contains(section.MaterialIndex))
 			{
+				const int32 sectionToUse = matIndexToUVSection.FindChecked(section.MaterialIndex);
 				section.MaterialIndex = sectionedMatIndex;
+
+				// Add a UV section with all verts UV x squished into the UV section
+				for(FSoftSkinVertex& vert : section.SoftVertices)
+				{
+					vert.UVs[lodModel.NumTexCoords - 1] = vert.UVs[0];
+					constexpr float halfStride = (1.0f / 16.0f) / 2.0f;
+					const float sectionMidX = sectionToUse * (1.0f / 16.0f) + halfStride;
+					vert.UVs[lodModel.NumTexCoords - 1].X = sectionMidX;
+				}
 			}
 			else
 			{
+				// Just assign the new material and create a copy of UV index 0
 				section.MaterialIndex = slotRemap.FindChecked(section.MaterialIndex);
+				for(FSoftSkinVertex& vert : section.SoftVertices)
+				{
+					vert.UVs[lodModel.NumTexCoords - 1] = vert.UVs[0];
+				}
 			}
 		}
-		
-		// IMeshUtilities& MeshUtilities = FModuleManager::Get().LoadModuleChecked<IMeshUtilities>("MeshUtilities");
-		// bool bBuildSuccess = MeshUtilities.BuildSkeletalMesh(lodModel,
-		// 													 sectionedMesh->GetPathName(),
-		// 													 sectionedMesh->GetRefSkeleton(),
-		// 													 LODInfluences,
-		// 													 LODWedges,
-		// 													 LODFaces,
-		// 													 LODPoints,
-		// 													 LODPointToRawMap,
-		// 													 BuildOptions,
-		// 													 &WarningMessages,
-		// 													 &WarningNames);
 	}
 
+	// Push new GUID so the DDC gets updated
+	sectionedMesh->InvalidateDeriveDataCacheGUID();
+
+	// Post edit to rebuild the resources etc and mark dirty
 	sectionedMesh->PostEditChange();
 	sectionedMesh->MarkPackageDirty();
-
-	// Rebuild resources
-	sectionedMesh->ReleaseResources();
-	sectionedMesh->InitResources();
 
 	FAssetRegistryModule::AssetCreated(sectionedMesh);
 	return sectionedMesh;

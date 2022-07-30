@@ -7,6 +7,7 @@ public class SectionedUVTools : ModuleRules
 	public SectionedUVTools(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
+		//OptimizeCode = CodeOptimization.Never;
 		
 		PublicIncludePaths.AddRange(
 			new string[] {
