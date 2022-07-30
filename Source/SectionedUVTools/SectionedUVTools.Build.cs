@@ -1,4 +1,4 @@
-// Solar Storm Interaction, 2022
+// Copyright (c) 2022 Solar Storm Interactive
 
 using UnrealBuildTool;
 
@@ -38,16 +38,27 @@ public class SectionedUVTools : ModuleRules
 				"Engine",
 				"Slate",
 				"SlateCore",
+				"MeshBuilder",
+				"MaterialUtilities",
+				"RawMesh",
+				"MeshUtilities",
 				// ... add private dependencies that you statically link with here ...	
 			}
 			);
 		
 		
-		DynamicallyLoadedModuleNames.AddRange(
-			new string[]
-			{
-				// ... add any modules that your module loads dynamically here ...
+		PrivateIncludePathModuleNames.AddRange(
+			new string[] {
+				"Settings",
+				"AssetTools",
+				"AssetRegistry",
 			}
-			);
+		);
+
+		DynamicallyLoadedModuleNames.AddRange(
+			new string[] {
+				"AssetTools",
+			}
+		);
 	}
 }

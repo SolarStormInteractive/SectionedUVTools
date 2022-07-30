@@ -1,4 +1,4 @@
-// Solar Storm Interaction, 2022
+// Copyright (c) 2022 Solar Storm Interactive
 
 #pragma once
 
