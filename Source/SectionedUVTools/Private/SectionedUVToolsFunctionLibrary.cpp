@@ -6,9 +6,77 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "MeshUtilities.h"
 #include "Rendering/SkeletalMeshModel.h"
-#include "IMeshBuilderModule.h"
+//#include "IMeshBuilderModule.h"
 
 DEFINE_LOG_CATEGORY(LogSectionedUVTools);
+
+namespace SectionedUVTools
+{
+	//--------------------------------------------------------------------------------------------------------------------
+	/**
+	*/
+	static bool RemoveMeshSection(FSkeletalMeshLODModel& Model, int32 SectionIndex) 
+	{
+		// Need a valid section
+		if (!Model.Sections.IsValidIndex(SectionIndex))
+		{
+			return false;
+		}
+
+		const FSkelMeshSection& SectionToRemove = Model.Sections[SectionIndex];
+
+		if (SectionToRemove.CorrespondClothAssetIndex != INDEX_NONE)
+		{
+			// Can't remove this, clothing currently relies on it
+			return false;
+		}
+
+		const uint32 NumVertsToRemove   = SectionToRemove.GetNumVertices();
+		const uint32 BaseVertToRemove   = SectionToRemove.BaseVertexIndex;
+		const uint32 NumIndicesToRemove = SectionToRemove.NumTriangles * 3;
+		const uint32 BaseIndexToRemove  = SectionToRemove.BaseIndex;
+
+
+		// Strip indices
+		Model.IndexBuffer.RemoveAt(BaseIndexToRemove, NumIndicesToRemove);
+
+		Model.Sections.RemoveAt(SectionIndex);
+
+		// Fixup indices above base vert
+		for (uint32& Index : Model.IndexBuffer)
+		{
+			if (Index >= BaseVertToRemove)
+			{
+				Index -= NumVertsToRemove;
+			}
+		}
+
+		Model.NumVertices -= NumVertsToRemove;
+
+		// Fixup anything needing section indices
+		for (FSkelMeshSection& Section : Model.Sections)
+		{
+			// Push back clothing indices
+			if (Section.CorrespondClothAssetIndex > SectionIndex)
+			{
+				Section.CorrespondClothAssetIndex--;
+			}
+
+			// Removed indices, re-base further sections
+			if (Section.BaseIndex > BaseIndexToRemove)
+			{
+				Section.BaseIndex -= NumIndicesToRemove;
+			}
+
+			// Remove verts, re-base further sections
+			if (Section.BaseVertexIndex > BaseVertToRemove)
+			{
+				Section.BaseVertexIndex -= NumVertsToRemove;
+			}
+		}
+		return true;
+	}
+}
 
 //--------------------------------------------------------------------------------------------------------------------
 /**
@@ -129,6 +197,64 @@ USkeletalMesh* USectionedUVToolsFunctionLibrary::CreateSectionedUVSkeletalMesh(U
 	// Add the new material for the sectioned mesh parts
 	const int32 sectionedMatIndex = materials.Emplace(nullptr, true, false, FName("sectioned"), FName("sectioned"));
 	
+	// Merge the sections which will use the new sectioned material
+	for(FSkeletalMeshLODModel& lodModel : skelMeshModel->LODModels)
+	{
+		FSkelMeshSection mergedSections;
+		mergedSections.MaterialIndex = sectionedMatIndex;
+		TArray<uint32> mergedIndexBuffer;
+
+		int32 accumVertsCount = 0;
+		int32 mergedVertsCount = 0;
+		
+		for(int32 sectionIndex = 0; sectionIndex < lodModel.Sections.Num(); ++sectionIndex)
+		{
+			FSkelMeshSection& section = lodModel.Sections[sectionIndex];
+			if(materialSlots.Contains(section.MaterialIndex))
+			{
+				// This section will be merged into a new combined section
+				mergedSections.NumTriangles += section.NumTriangles;
+				mergedSections.SoftVertices.Append(section.SoftVertices);
+				for(FBoneIndexType& boneIndex : section.BoneMap)
+				{
+					mergedSections.BoneMap.AddUnique(boneIndex);
+				}
+				mergedSections.NumVertices += section.NumVertices;
+				mergedSections.MaxBoneInfluences = FMath::Max(mergedSections.MaxBoneInfluences, section.MaxBoneInfluences);
+				if(section.bUse16BitBoneIndex)
+				{
+					mergedSections.bUse16BitBoneIndex = true;
+				}
+
+				const uint32 numSectionIndices = section.NumTriangles * 3;
+				for(uint32 sectionVertIndex = 0; sectionVertIndex < numSectionIndices; ++sectionVertIndex)
+				{
+					// Add index, offsetting away the current accumulation to this point, and adding the merged count to this point
+					mergedIndexBuffer.Add((lodModel.IndexBuffer[section.BaseIndex + sectionVertIndex] - accumVertsCount) + mergedVertsCount);
+				}
+
+				mergedVertsCount += section.GetNumVertices();
+				accumVertsCount += section.GetNumVertices();
+				SectionedUVTools::RemoveMeshSection(lodModel, sectionIndex);
+			}
+			else
+			{
+				accumVertsCount += section.GetNumVertices();
+			}
+		}
+
+		// Add the merged section in at the end
+		mergedSections.BaseIndex = lodModel.IndexBuffer.Num();
+		mergedSections.BaseVertexIndex = lodModel.NumVertices;
+		for(const int32& indexToReinsert : mergedIndexBuffer)
+		{
+			lodModel.IndexBuffer.Add(indexToReinsert + lodModel.NumVertices);
+		}
+		lodModel.Sections.Add(mergedSections);
+		lodModel.NumVertices += mergedSections.GetNumVertices();
+	}
+
+	// Update the material sections with another UV for the 
 	for(FSkeletalMeshLODModel& lodModel : skelMeshModel->LODModels)
 	{
 		// Add another texture coordinate
@@ -144,8 +270,8 @@ USkeletalMesh* USectionedUVToolsFunctionLibrary::CreateSectionedUVSkeletalMesh(U
 				for(FSoftSkinVertex& vert : section.SoftVertices)
 				{
 					vert.UVs[lodModel.NumTexCoords - 1] = vert.UVs[0];
-					constexpr float halfStride = (1.0f / 16.0f) / 2.0f;
-					const float sectionMidX = sectionToUse * (1.0f / 16.0f) + halfStride;
+					const float halfStride = (1.0f / numSections) / 2.0f;
+					const float sectionMidX = sectionToUse * (1.0f / numSections) + halfStride;
 					vert.UVs[lodModel.NumTexCoords - 1].X = sectionMidX;
 				}
 			}
