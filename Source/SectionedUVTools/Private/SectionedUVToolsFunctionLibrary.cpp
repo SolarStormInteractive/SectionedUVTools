@@ -76,6 +76,31 @@ namespace SectionedUVTools
 		}
 		return true;
 	}
+
+	bool GetSectionFromVertexIndex(TArray<FSkelMeshSection>& Sections, int32 InVertIndex, int32& OutSectionIndex, int32& OutVertIndex)
+	{
+		OutSectionIndex = 0;
+		OutVertIndex = 0;
+
+		int32 VertCount = 0;
+
+		// Iterate over each chunk
+		for (int32 SectionCount = 0; SectionCount < Sections.Num(); SectionCount++)
+		{
+			const FSkelMeshSection& Section = Sections[SectionCount];
+			OutSectionIndex = SectionCount;
+
+			// Is it in Soft vertex range?
+			if (InVertIndex < VertCount + Section.GetNumVertices())
+			{
+				OutVertIndex = InVertIndex - VertCount;
+				return true;
+			}
+			VertCount += Section.GetNumVertices();
+		}
+
+		return false;
+	}
 }
 
 //--------------------------------------------------------------------------------------------------------------------
@@ -196,8 +221,11 @@ USkeletalMesh* USectionedUVToolsFunctionLibrary::CreateSectionedUVSkeletalMesh(U
 
 	// Add the new material for the sectioned mesh parts
 	const int32 sectionedMatIndex = materials.Emplace(nullptr, true, false, FName("sectioned"), FName("sectioned"));
+
+	TArray<UMorphTarget*>& morphTargets = sectionedMesh->GetMorphTargets();
 	
 	// Merge the sections which will use the new sectioned material
+	int32 lodIndex = 0;
 	for(FSkeletalMeshLODModel& lodModel : skelMeshModel->LODModels)
 	{
 		FSkelMeshSection mergedSections;
@@ -206,21 +234,54 @@ USkeletalMesh* USectionedUVToolsFunctionLibrary::CreateSectionedUVSkeletalMesh(U
 
 		int32 accumVertsCount = 0;
 		int32 mergedVertsCount = 0;
+		int32 boneMapAccum = 0;
+
+		TArray<int32> sectionsToRemove;
+
+		// Add the extra tex coord for the sectioning
+		lodModel.NumTexCoords += 1;
+		
+		TArray<int32> oldToNewSectionMap;
+		int32 newSectionIndex = 0;
+		
+		TMap<int32, int32> sectionedSectionMapping;
 		
 		for(int32 sectionIndex = 0; sectionIndex < lodModel.Sections.Num(); ++sectionIndex)
 		{
 			FSkelMeshSection& section = lodModel.Sections[sectionIndex];
 			if(materialSlots.Contains(section.MaterialIndex))
 			{
+				oldToNewSectionMap.Add(INDEX_NONE);
+				
 				// This section will be merged into a new combined section
 				mergedSections.NumTriangles += section.NumTriangles;
-				mergedSections.SoftVertices.Append(section.SoftVertices);
-				for(FBoneIndexType& boneIndex : section.BoneMap)
-				{
-					mergedSections.BoneMap.AddUnique(boneIndex);
-				}
-				mergedSections.NumVertices += section.NumVertices;
+
 				mergedSections.MaxBoneInfluences = FMath::Max(mergedSections.MaxBoneInfluences, section.MaxBoneInfluences);
+
+				const int32 sectionToUse = matIndexToUVSection.FindChecked(section.MaterialIndex);
+				section.MaterialIndex = sectionedMatIndex;
+
+				TArray<FSoftSkinVertex> softVerts = section.SoftVertices;
+				for(FSoftSkinVertex& vert : softVerts)
+				{
+					for(int32 boneInfIndex = 0; boneInfIndex < section.MaxBoneInfluences; ++boneInfIndex)
+					{
+						vert.InfluenceBones[boneInfIndex] += boneMapAccum;
+					}
+
+					// Add a UV section with all verts UV x squished into the UV section
+					vert.UVs[lodModel.NumTexCoords - 1] = vert.UVs[0];
+					const float halfStride = (1.0f / numSections) / 2.0f;
+					const float sectionMidX = sectionToUse * (1.0f / numSections) + halfStride;
+					vert.UVs[lodModel.NumTexCoords - 1].X = sectionMidX;
+				}
+				
+				boneMapAccum += section.BoneMap.Num();
+				
+				mergedSections.SoftVertices.Append(softVerts);
+				mergedSections.BoneMap.Append(section.BoneMap);
+
+				mergedSections.NumVertices += section.NumVertices;
 				if(section.bUse16BitBoneIndex)
 				{
 					mergedSections.bUse16BitBoneIndex = true;
@@ -233,14 +294,37 @@ USkeletalMesh* USectionedUVToolsFunctionLibrary::CreateSectionedUVSkeletalMesh(U
 					mergedIndexBuffer.Add((lodModel.IndexBuffer[section.BaseIndex + sectionVertIndex] - accumVertsCount) + mergedVertsCount);
 				}
 
+				sectionedSectionMapping.Add(sectionIndex, mergedVertsCount);
+
 				mergedVertsCount += section.GetNumVertices();
 				accumVertsCount += section.GetNumVertices();
-				SectionedUVTools::RemoveMeshSection(lodModel, sectionIndex);
+				sectionsToRemove.Add(sectionIndex);
 			}
 			else
 			{
+				oldToNewSectionMap.Add(newSectionIndex++);
+				
 				accumVertsCount += section.GetNumVertices();
+
+				// Just assign the new material and create a copy of UV index 0
+				section.MaterialIndex = slotRemap.FindChecked(section.MaterialIndex);
+				for(FSoftSkinVertex& vert : section.SoftVertices)
+				{
+					vert.UVs[lodModel.NumTexCoords - 1] = vert.UVs[0];
+				}
 			}
+		}
+
+		// Copy all sections so we can reference how they were after to fixup morph targets
+		// This kinda sucks but is the easiest way I could think of without building mappings
+		// and adding a lot more code.
+		TArray<FSkelMeshSection> sectionsCopy = lodModel.Sections;
+		
+		// Actually remove the sections
+		for(int32 sectionIndex = sectionsToRemove.Num() - 1; sectionIndex >= 0; --sectionIndex)
+		{
+			const int32& sectionToRemove = sectionsToRemove[sectionIndex];
+			SectionedUVTools::RemoveMeshSection(lodModel, sectionToRemove);
 		}
 
 		// Add the merged section in at the end
@@ -250,41 +334,51 @@ USkeletalMesh* USectionedUVToolsFunctionLibrary::CreateSectionedUVSkeletalMesh(U
 		{
 			lodModel.IndexBuffer.Add(indexToReinsert + lodModel.NumVertices);
 		}
-		lodModel.Sections.Add(mergedSections);
+		const int32 sectionedSectionIndex = lodModel.Sections.Add(mergedSections);
 		lodModel.NumVertices += mergedSections.GetNumVertices();
-	}
 
-	// Update the material sections with another UV for the 
-	for(FSkeletalMeshLODModel& lodModel : skelMeshModel->LODModels)
-	{
-		// Add another texture coordinate
-		lodModel.NumTexCoords += 1;
+		// Cache off the number of verts to each section so we can re-offset the morph targets next
+		TArray<int32> sectionBaseVertices;
+		int32 accumVerts = 0;
 		for(FSkelMeshSection& section : lodModel.Sections)
 		{
-			if(materialSlots.Contains(section.MaterialIndex))
-			{
-				const int32 sectionToUse = matIndexToUVSection.FindChecked(section.MaterialIndex);
-				section.MaterialIndex = sectionedMatIndex;
-
-				// Add a UV section with all verts UV x squished into the UV section
-				for(FSoftSkinVertex& vert : section.SoftVertices)
-				{
-					vert.UVs[lodModel.NumTexCoords - 1] = vert.UVs[0];
-					const float halfStride = (1.0f / numSections) / 2.0f;
-					const float sectionMidX = sectionToUse * (1.0f / numSections) + halfStride;
-					vert.UVs[lodModel.NumTexCoords - 1].X = sectionMidX;
-				}
-			}
-			else
-			{
-				// Just assign the new material and create a copy of UV index 0
-				section.MaterialIndex = slotRemap.FindChecked(section.MaterialIndex);
-				for(FSoftSkinVertex& vert : section.SoftVertices)
-				{
-					vert.UVs[lodModel.NumTexCoords - 1] = vert.UVs[0];
-				}
-			}
+			sectionBaseVertices.Add(accumVerts);
+			accumVerts += section.GetNumVertices();
 		}
+
+		// Fixup all of the morph targets with the new vertex offsets
+		for(UMorphTarget* morphTarget : morphTargets)
+		{
+			if(!morphTarget->MorphLODModels.IsValidIndex(lodIndex))
+			{
+				continue;
+			}
+
+			FMorphTargetLODModel& morphLOD = morphTarget->MorphLODModels[lodIndex];
+			morphLOD.SectionIndices.Empty();
+			for(FMorphTargetDelta& morphVert : morphLOD.Vertices)
+			{
+				// Get the original section and vertex index
+				int32 outSectionIndex; int32 outVertIndex;
+				SectionedUVTools::GetSectionFromVertexIndex(sectionsCopy, morphVert.SourceIdx, outSectionIndex, outVertIndex);
+
+				// Translate into the new section locations
+				int32 foundNewIndex = oldToNewSectionMap[outSectionIndex];
+				int32 subSectionVertCount = 0;
+				if(foundNewIndex == INDEX_NONE)
+				{
+					foundNewIndex = sectionedSectionIndex;
+					subSectionVertCount = sectionedSectionMapping[outSectionIndex];
+				}
+
+				morphVert.SourceIdx = outVertIndex + sectionBaseVertices[foundNewIndex] + subSectionVertCount;
+				morphLOD.SectionIndices.AddUnique(foundNewIndex);
+			}
+			
+			morphTarget->PostEditChange();
+		}
+
+		++lodIndex;
 	}
 
 	// Push new GUID so the DDC gets updated
@@ -293,6 +387,8 @@ USkeletalMesh* USectionedUVToolsFunctionLibrary::CreateSectionedUVSkeletalMesh(U
 	// Post edit to rebuild the resources etc and mark dirty
 	sectionedMesh->PostEditChange();
 	sectionedMesh->MarkPackageDirty();
+
+	sectionedMesh->InitMorphTargets();
 
 	FAssetRegistryModule::AssetCreated(sectionedMesh);
 	return sectionedMesh;
