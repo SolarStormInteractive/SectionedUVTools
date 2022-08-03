@@ -3,15 +3,18 @@
 #include "SectionedUVToolsFunctionLibrary.h"
 #include "Engine/SkeletalMesh.h"
 #include "Engine/StaticMesh.h"
+#include "RawMesh.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "MeshUtilities.h"
 #include "Rendering/SkeletalMeshModel.h"
-//#include "IMeshBuilderModule.h"
+//#include "StaticMeshOperations.h"
 
 DEFINE_LOG_CATEGORY(LogSectionedUVTools);
 
 namespace SectionedUVTools
 {
+	static FName SectionedSlotName = FName("sectioned");
+	
 	//--------------------------------------------------------------------------------------------------------------------
 	/**
 	*/
@@ -120,6 +123,15 @@ USkeletalMesh* USectionedUVToolsFunctionLibrary::CreateSectionedUVSkeletalMesh(U
 		UE_LOG(LogSectionedUVTools, Error, TEXT("Cannot section the skeletal mesh. Number of sections should be greater than 2. 8 or 16 are good choices."));
 		return nullptr;
 	}
+
+	for(FSkeletalMaterial& material : skeletalMesh->GetMaterials())
+	{
+		if(material.MaterialSlotName == SectionedUVTools::SectionedSlotName)
+		{
+			UE_LOG(LogSectionedUVTools, Error, TEXT("Cannot section the skeletal mesh. Mesh already contains a 'sectioned' material slot!"));
+			return nullptr;
+		}
+	}
 	
 	if(materialSlots.Num())
 	{
@@ -220,7 +232,7 @@ USkeletalMesh* USectionedUVToolsFunctionLibrary::CreateSectionedUVSkeletalMesh(U
 	}
 
 	// Add the new material for the sectioned mesh parts
-	const int32 sectionedMatIndex = materials.Emplace(nullptr, true, false, FName("sectioned"), FName("sectioned"));
+	const int32 sectionedMatIndex = materials.Emplace(nullptr, true, false, SectionedUVTools::SectionedSlotName, SectionedUVTools::SectionedSlotName);
 
 	TArray<UMorphTarget*>& morphTargets = sectionedMesh->GetMorphTargets();
 	
@@ -401,10 +413,203 @@ UStaticMesh* USectionedUVToolsFunctionLibrary::CreateSectionedUVStaticMesh(UStat
 																		   TArray<int32> materialSlots,
 																		   const int32 numSections)
 {
-	if(!staticMesh)
+	if(!staticMesh || !staticMesh->GetPackage())
 	{
 		return nullptr;
 	}
+
+	if(numSections < 2)
+	{
+		UE_LOG(LogSectionedUVTools, Error, TEXT("Cannot section the static mesh. Number of sections should be greater than 2. 8 or 16 are good choices."));
+		return nullptr;
+	}
+
+	for(FStaticMaterial& material : staticMesh->GetStaticMaterials())
+	{
+		if(material.MaterialSlotName == SectionedUVTools::SectionedSlotName)
+		{
+			UE_LOG(LogSectionedUVTools, Error, TEXT("Cannot section the static mesh. Mesh already contains a 'sectioned' material slot!"));
+			return nullptr;
+		}
+	}
 	
-	return nullptr;
+	if(materialSlots.Num())
+	{
+		const TArray<FStaticMaterial>& materials = staticMesh->GetStaticMaterials();
+		for(const int32& materialSlot : materialSlots)
+		{
+			if(!materials.IsValidIndex(materialSlot))
+			{
+				UE_LOG(LogSectionedUVTools, Error, TEXT("Cannot section the static mesh. Material slot index '%d' is invalid!"), materialSlot);
+				return nullptr;
+			}
+		}
+
+		// Make sure the slots are in order so we can reverse remove them
+		Algo::Sort(materialSlots, [](const int32& a, const int32& b) -> bool
+		{
+			return a < b;
+		});
+	}
+	else
+	{
+		const TArray<FStaticMaterial>& materials = staticMesh->GetStaticMaterials();
+		for(int32 materialIndex = 0; materialIndex < materials.Num(); ++materialIndex)
+		{
+			materialSlots.Add(materialIndex);
+		}
+	}
+
+	if(numSections < materialSlots.Num())
+	{
+		UE_LOG(LogSectionedUVTools, Error, TEXT("Cannot section the static mesh. Number of sections needs to be greater than or equal to the number of materials!"));
+		return nullptr;
+	}
+
+	TMap<int32, int32> matIndexToUVSection;
+	int32 curSectionIndex = 0;
+	for(const int32& materialSlot : materialSlots)
+	{
+		matIndexToUVSection.Add(materialSlot, curSectionIndex++);
+	}
+	
+	FString packageName = staticMesh->GetPackage()->GetPathName() + TEXT("_sectioned");
+	if(FindPackage(nullptr, *packageName))
+	{
+		int32 sectionIndex = 1;
+		while(FindPackage(nullptr, *(packageName + FString::FromInt(sectionIndex))))
+		{
+			++sectionIndex;
+		}
+		packageName = packageName + FString::FromInt(sectionIndex);
+	}
+
+	UPackage* staticMeshPackage = CreatePackage(*packageName);
+	if(!staticMeshPackage)
+	{
+		UE_LOG(LogSectionedUVTools, Error, TEXT("Unable to create package for new sectioned mesh!"));
+		return nullptr;
+	}
+	
+	UStaticMesh* sectionedMesh = DuplicateObject<UStaticMesh>(staticMesh, staticMeshPackage, FName(*FPaths::GetBaseFilename(packageName)));
+	if(!sectionedMesh)
+	{
+		UE_LOG(LogSectionedUVTools, Error, TEXT("Unable to create static mesh asset to make into a sectioned mesh!"));
+		return nullptr;
+	}
+	
+	if(!sectionedMesh->GetNumSourceModels())
+	{
+		sectionedMesh->ConditionalBeginDestroy();
+		staticMeshPackage->ConditionalBeginDestroy();
+		UE_LOG(LogSectionedUVTools, Error, TEXT("Cannot section the static mesh. No source models in this mesh?"));
+		return nullptr;
+	}
+
+	int32 sectionedUVChannel = 0;
+	for(int32 sourceModelIndex = 0; sourceModelIndex < sectionedMesh->GetNumSourceModels(); ++sourceModelIndex)
+	{
+		FStaticMeshSourceModel& srcModel = sectionedMesh->GetSourceModel(sourceModelIndex);
+		const int32 numUVChannels = sectionedMesh->GetNumUVChannels(sourceModelIndex);
+		if(sourceModelIndex == 0)
+		{
+			sectionedUVChannel = numUVChannels;
+			if(srcModel.BuildSettings.bGenerateLightmapUVs)
+			{
+				// Make sure it is after the generated lightmap UV
+				sectionedUVChannel = srcModel.BuildSettings.DstLightmapIndex + 1;
+				if(numUVChannels > sectionedUVChannel)
+				{
+					// Extra channels were already added, so put us after that
+					sectionedUVChannel = numUVChannels;
+				}
+			}
+		}
+		if(numUVChannels == MAX_MESH_TEXTURE_COORDS || numUVChannels > sectionedUVChannel)
+		{
+			sectionedMesh->ConditionalBeginDestroy();
+			staticMeshPackage->ConditionalBeginDestroy();
+			UE_LOG(LogSectionedUVTools, Error, TEXT("Cannot section the static mesh. The mesh cannot support a new UV channel because of max channel limit or inconsistent UV num per LOD!"));
+			return nullptr;
+		}
+
+		// Make sure each LOD has the sectioned UV as the same index
+		for(int32 UVChan = numUVChannels; UVChan < sectionedUVChannel + 1; ++UVChan)
+		{
+			//FStaticMeshOperations::AddUVChannel(*srcModel.MeshDescription);
+			sectionedMesh->AddUVChannel(sourceModelIndex);
+		}
+	}
+	
+	// Get rid of the material slots we are merging
+	TArray<FStaticMaterial>& materials = sectionedMesh->GetStaticMaterials();
+
+	// Add the new material for the sectioned mesh parts
+	const int32 sectionedMatIndex = materials.AddDefaulted();
+	materials[sectionedMatIndex].MaterialSlotName = SectionedUVTools::SectionedSlotName;
+	materials[sectionedMatIndex].UVChannelData = FMeshUVChannelInfo(1.0f);
+
+	// Create a mapping of what the material slots will be after to re-assign once we have removed the slots
+	TMap<int32, int32> slotRemap;
+	int32 actualSlotIndex = 0;
+	for(int32 materialSlotIndex = 0; materialSlotIndex < materials.Num() - 1; ++materialSlotIndex, ++actualSlotIndex)
+	{
+		if(materialSlots.Contains(materialSlotIndex))
+		{
+			--actualSlotIndex;
+			slotRemap.Add(materialSlotIndex, sectionedMatIndex);
+		}
+		else
+		{
+			slotRemap.Add(materialSlotIndex, actualSlotIndex);
+		}
+	}
+
+	// Remove the material slots we don't want
+	for(int32 materialSlotIndex = materialSlots.Num() - 1; materialSlotIndex >= 0; --materialSlotIndex)
+	{
+		materials.RemoveAt(materialSlots[materialSlotIndex]);
+	}
+	
+	for(int32 sourceModelIndex = 0; sourceModelIndex < sectionedMesh->GetNumSourceModels(); ++sourceModelIndex)
+	{
+		FStaticMeshSourceModel& sourceModel = sectionedMesh->GetSourceModels()[sourceModelIndex];
+		
+		FRawMesh outRawMesh;
+		sourceModel.LoadRawMesh(outRawMesh);
+
+		// Create a copy of the wedge texture coordinates. We will modify the ones using the new section material.
+		outRawMesh.WedgeTexCoords[sectionedUVChannel] = outRawMesh.WedgeTexCoords[0];
+
+		// Remap the material indices to the new reduced set
+		for(int32 faceIndex = 0; faceIndex < outRawMesh.FaceMaterialIndices.Num(); ++faceIndex)
+		{
+			int32& matIndex = outRawMesh.FaceMaterialIndices[faceIndex];
+			int32* sectionToUse = matIndexToUVSection.Find(matIndex);
+			matIndex = slotRemap[matIndex];
+			if(matIndex == sectionedMatIndex)
+			{
+				check(sectionToUse);
+				const float halfStride = (1.0f / numSections) / 2.0f;
+				const float sectionMidX = *sectionToUse * (1.0f / numSections) + halfStride;
+				
+				// Update the UVs for this face
+				const int32 firstWedgeIndex = faceIndex * 3;
+				for(int32 wedgeIndex = 0; wedgeIndex < 3; ++wedgeIndex)
+				{
+					outRawMesh.WedgeTexCoords[sectionedUVChannel][firstWedgeIndex + wedgeIndex].X = sectionMidX;
+				}
+			}
+		}
+
+		sourceModel.SaveRawMesh(outRawMesh);
+	}
+
+	// Post edit to rebuild the resources etc and mark dirty
+	sectionedMesh->PostEditChange();
+	sectionedMesh->MarkPackageDirty();
+
+	FAssetRegistryModule::AssetCreated(sectionedMesh);
+	
+	return sectionedMesh;
 }

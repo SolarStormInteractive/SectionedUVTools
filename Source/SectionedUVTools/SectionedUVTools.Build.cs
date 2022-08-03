@@ -43,6 +43,7 @@ public class SectionedUVTools : ModuleRules
 				"MaterialUtilities",
 				"RawMesh",
 				"MeshUtilities",
+				"StaticMeshDescription",
 				// ... add private dependencies that you statically link with here ...	
 			}
 			);
