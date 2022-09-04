@@ -361,12 +361,19 @@ USkeletalMesh* USectionedUVToolsFunctionLibrary::CreateSectionedUVSkeletalMesh(U
 		// Fixup all of the morph targets with the new vertex offsets
 		for(UMorphTarget* morphTarget : morphTargets)
 		{
+#if ENGINE_MAJOR_VERSION >= 5
+			if(!morphTarget->GetMorphLODModels().IsValidIndex(lodIndex))
+#else
 			if(!morphTarget->MorphLODModels.IsValidIndex(lodIndex))
+#endif
 			{
 				continue;
 			}
-
+#if ENGINE_MAJOR_VERSION >= 5
+			FMorphTargetLODModel& morphLOD = morphTarget->GetMorphLODModels()[lodIndex];
+#else
 			FMorphTargetLODModel& morphLOD = morphTarget->MorphLODModels[lodIndex];
+#endif
 			morphLOD.SectionIndices.Empty();
 			for(FMorphTargetDelta& morphVert : morphLOD.Vertices)
 			{
@@ -573,7 +580,11 @@ UStaticMesh* USectionedUVToolsFunctionLibrary::CreateSectionedUVStaticMesh(UStat
 	
 	for(int32 sourceModelIndex = 0; sourceModelIndex < sectionedMesh->GetNumSourceModels(); ++sourceModelIndex)
 	{
+#if ENGINE_MAJOR_VERSION >= 5
+		FStaticMeshSourceModel& sourceModel = sectionedMesh->GetSourceModel(sourceModelIndex);
+#else
 		FStaticMeshSourceModel& sourceModel = sectionedMesh->GetSourceModels()[sourceModelIndex];
+#endif
 		
 		FRawMesh outRawMesh;
 		sourceModel.LoadRawMesh(outRawMesh);
